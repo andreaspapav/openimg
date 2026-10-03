@@ -96,6 +96,25 @@ return getImgResponse(request, { headers, cacheFolder: "no_cache" });
 
 If you set `cacheFolder` to `no_cache`, the optimized image will not be cached to disk. This is useful for serverless environments or when you want to cache the image only via a CDN.
 
+There is no `metadata.json` index. A cache hit is "does this file exist?". Writes go to a unique `*.tmp` file in the same folder, then rename into place, so readers never see a partial file. Leftover `*.tmp` files from crashes can be deleted by an external cleanup job — see [Cache maintenance](../guides/cache-maintenance.md).
+
+#### touchCacheOnHit: boolean | { intervalMs: number } (Bun only)
+
+Defaults to `false`. When enabled, a cache hit updates the file's mtime if it is older than the interval (`true` means 24 hours). That makes mtime mean "last used" for external TTL cleanup. openimg only sees requests that miss the CDN, so "last used" means "last requested by the CDN".
+
+```typescript
+getImgResponse(request, { touchCacheOnHit: true });
+getImgResponse(request, { touchCacheOnHit: { intervalMs: 60 * 60 * 1000 } });
+```
+
+#### maxConcurrentTransforms: number (Bun only)
+
+Defaults to unlimited. Caps how many fetch+sharp transforms run at once. Cache hits never take a slot. Must be an integer ≥ 1.
+
+```typescript
+getImgResponse(request, { maxConcurrentTransforms: 2 });
+```
+
 #### allowlistedOrigins: string[] | ['*']
 
 List of allowed remote origins. Defaults to `[]`, which means no remote origins are allowed and images will not be fetched from remote locations. Any attempt to query via absolute URLs will return a 403 response. Instead, only relative pathnames are allowed (e.g., `/cat.png`) for local images hosted on the server.

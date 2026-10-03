@@ -20,6 +20,59 @@ import invariant, {
 
 const pipelineLock = new PipelineLock();
 const caches = new Map<string, FileCache>();
+const semaphores = new Map<number, Semaphore>();
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+class Semaphore {
+  #max: number;
+  #active = 0;
+  #queue: Array<() => void> = [];
+
+  constructor(max: number) {
+    this.#max = max;
+  }
+
+  async acquire() {
+    if (this.#active < this.#max) {
+      this.#active++;
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      this.#queue.push(resolve);
+    });
+  }
+
+  release() {
+    const next = this.#queue.shift();
+    if (next) {
+      next();
+    } else {
+      this.#active--;
+    }
+  }
+}
+
+function getSemaphore(limit: number): Semaphore {
+  let semaphore = semaphores.get(limit);
+  if (!semaphore) {
+    semaphore = new Semaphore(limit);
+    semaphores.set(limit, semaphore);
+  }
+  return semaphore;
+}
+
+function resolveTouchInterval(
+  touchCacheOnHit: Config["touchCacheOnHit"]
+): number | null {
+  if (!touchCacheOnHit) {
+    return null;
+  }
+  if (touchCacheOnHit === true) {
+    return DAY_MS;
+  }
+  return touchCacheOnHit.intervalMs;
+}
 
 /**
  * getImgResponse retrieves an image, optimizes it, and returns a HTTP response
@@ -32,6 +85,14 @@ const caches = new Map<string, FileCache>();
  */
 export async function getImgResponse(request: Request, config: Config = {}) {
   const headers = new Headers(config.headers);
+
+  if (config.maxConcurrentTransforms !== undefined) {
+    invariant(
+      Number.isInteger(config.maxConcurrentTransforms) &&
+        config.maxConcurrentTransforms >= 1,
+      "maxConcurrentTransforms must be an integer >= 1"
+    );
+  }
 
   // Get image parameters (src, width, height, fit, format) from the request
   const paramsRes = config.getImgParams
@@ -78,25 +139,36 @@ export async function getImgResponse(request: Request, config: Config = {}) {
     );
   }
 
-  if (config.cacheFolder !== "no_cache") {
-    const cacheFolder = config.cacheFolder || DEFAULT_CACHE_FOLDER;
+  const useCache = config.cacheFolder !== "no_cache";
+  const cacheFolder = useCache
+    ? config.cacheFolder || DEFAULT_CACHE_FOLDER
+    : null;
+
+  if (useCache && cacheFolder) {
     let cache = caches.get(cacheFolder);
     if (!cache) {
-      caches.set(cacheFolder, new FileCache(cacheFolder));
+      cache = new FileCache(cacheFolder, {
+        touchIntervalMs: resolveTouchInterval(config.touchCacheOnHit),
+      });
+      caches.set(cacheFolder, cache);
     }
   }
 
-  const cachePath =
-    config.cacheFolder !== "no_cache"
-      ? getCachePath({
-          params,
-          source,
-          sharpConfig,
-          cacheFolder: config.cacheFolder,
-        })
-      : null;
+  const cachePath = useCache
+    ? getCachePath({
+        params,
+        source,
+        sharpConfig,
+        cacheFolder: config.cacheFolder,
+      })
+    : null;
+
+  let lockToken: symbol | undefined;
+  let semaphore: Semaphore | null = null;
+  let releaseSemaphoreInFinally = false;
+
   try {
-    if (config.cacheFolder !== "no_cache") {
+    if (useCache) {
       invariant(cachePath, "Cache path is required");
       const lock = pipelineLock.get(cachePath);
       if (lock) {
@@ -104,21 +176,27 @@ export async function getImgResponse(request: Request, config: Config = {}) {
         await lock;
       }
 
-      const cache = caches.get(config.cacheFolder || DEFAULT_CACHE_FOLDER);
+      const cache = caches.get(cacheFolder!);
       invariant(cache, "Cache is required");
-      if (cache.hasFile(cachePath)) {
-        return cache.streamFromCache(cachePath, headers);
+      const cached = await cache.get(cachePath, headers);
+      if (cached) {
+        return cached;
       }
 
       // Register ongoing write to the cache file
-      pipelineLock.add(cachePath);
+      lockToken = pipelineLock.add(cachePath);
+    }
+
+    if (config.maxConcurrentTransforms !== undefined) {
+      semaphore = getSemaphore(config.maxConcurrentTransforms);
+      await semaphore.acquire();
+      releaseSemaphoreInFinally = true;
     }
 
     let readStream: Readable;
     if (source.type === "fetch") {
       const fetchRes = await fetch(source.url, { headers: source.headers });
       if (!fetchRes.ok || !fetchRes.body) {
-        pipelineLock.resolve(cachePath);
         return new Response(null, {
           status: fetchRes.status || 404,
           statusText: fetchRes.statusText || "Image not found",
@@ -127,7 +205,6 @@ export async function getImgResponse(request: Request, config: Config = {}) {
       readStream = fromWebStream(fetchRes.body);
     } else if (source.type === "fs") {
       if (!exists(source.path)) {
-        pipelineLock.resolve(cachePath);
         return new Response(null, {
           status: 404,
           statusText: "Image not found",
@@ -164,18 +241,31 @@ export async function getImgResponse(request: Request, config: Config = {}) {
 
     const outputImgInfo = await infoPromise;
 
-    if (config.cacheFolder !== "no_cache") {
+    if (useCache) {
       invariant(cachePath, "Cache path is required");
-
-      const cache = caches.get(config.cacheFolder || DEFAULT_CACHE_FOLDER);
+      const cache = caches.get(cacheFolder!);
       invariant(cache, "Cache is required");
-      await cache.streamToCache(cachePath, outputStream, {
-        size: outputImgInfo.size,
-        contentType: getContentType(outputImgInfo.format),
-      });
+      await cache.write(cachePath, outputStream);
+      const cached = await cache.get(cachePath, headers);
+      invariant(cached, "Cache write succeeded but read returned null");
+      return cached;
+    }
 
-      pipelineLock.resolve(cachePath);
-      return cache.streamFromCache(cachePath, headers);
+    // no_cache: response streams lazily — release the semaphore when the
+    // stream finishes instead of in finally, so we don't free the slot early.
+    if (semaphore) {
+      releaseSemaphoreInFinally = false;
+      let released = false;
+      const release = () => {
+        if (released) {
+          return;
+        }
+        released = true;
+        semaphore!.release();
+      };
+      outputStream.on("end", release);
+      outputStream.on("close", release);
+      outputStream.on("error", release);
     }
 
     headers.set("Content-Type", getContentType(outputImgInfo.format));
@@ -184,9 +274,15 @@ export async function getImgResponse(request: Request, config: Config = {}) {
       headers,
     });
   } catch (e: unknown) {
-    pipelineLock.resolve(cachePath);
     throw new Error(`Error while processing the image request`, {
       cause: e,
     });
+  } finally {
+    if (lockToken !== undefined) {
+      pipelineLock.resolve(cachePath, lockToken);
+    }
+    if (releaseSemaphoreInFinally && semaphore) {
+      semaphore.release();
+    }
   }
 }

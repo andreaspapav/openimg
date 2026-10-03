@@ -118,6 +118,8 @@ export type GetSharpPipeline = (
  *   Adding an '*' entry, ['*'], allows all remote origins.
  * - getImgSource: Provide a custom getImgSource function to map the request to a source path or url to the retrieve the original image.
  * - getImgParams: Provide a custom getImgParams function for more control over where to retrieve the image parameters from the request.
+ * - touchCacheOnHit: **Bun only.** When true (24h interval) or `{ intervalMs }`, update the cached file's mtime on hit if older than the interval so external cleanup can treat mtime as "last used". Default: false. Ignored by openimg/node.
+ * - maxConcurrentTransforms: **Bun only.** Cap concurrent fetch+sharp work. Cache hits never queue. Default: unlimited. Must be an integer ≥ 1. Ignored by openimg/node.
  */
 export type Config = {
   headers?: HeadersInit;
@@ -126,6 +128,10 @@ export type Config = {
   getImgSource?: GetImgSource;
   getSharpPipeline?: GetSharpPipeline;
   cacheFolder?: string | "no_cache"; // default: "./data/images"
+  /** Bun only. Ignored by openimg/node. */
+  touchCacheOnHit?: boolean | { intervalMs: number };
+  /** Bun only. Ignored by openimg/node. */
+  maxConcurrentTransforms?: number;
 };
 
 export function fromWebStream(stream: ReadableStream): Readable {
@@ -344,7 +350,10 @@ export function getDefaultSharpPipeline(params: ImgParams) {
 }
 
 export class PipelineLock {
-  pipelines = new Map<string, { p: Promise<void>; resolve: () => void }>();
+  pipelines = new Map<
+    string,
+    { p: Promise<void>; resolve: () => void; token: symbol }
+  >();
 
   get(cacheSrc: string) {
     const pipeline = this.pipelines.get(cacheSrc);
@@ -354,29 +363,44 @@ export class PipelineLock {
     return null;
   }
 
-  add(cacheSrc: string) {
+  /**
+   * Register an in-flight write for cacheSrc. Returns a token that must be
+   * passed to resolve() so a timed-out request cannot release a newer lock.
+   */
+  add(cacheSrc: string): symbol {
+    const token = Symbol("pipelineLock");
     let resolve: () => void;
     const p = new Promise<void>((r) => {
       const timeout = setTimeout(() => {
-        this.resolve(cacheSrc);
+        this.resolve(cacheSrc, token);
       }, 10000); // kill lock after 10 seconds
       resolve = () => {
         clearTimeout(timeout);
         r();
       };
     });
-    this.pipelines.set(cacheSrc, { p, resolve: resolve! });
+    this.pipelines.set(cacheSrc, { p, resolve: resolve!, token });
+    return token;
   }
 
-  resolve(cacheSrc: string | null) {
+  /**
+   * Release the lock for cacheSrc. When token is provided, only releases if it
+   * matches the current lock (Bun). Without a token, releases unconditionally
+   * (backwards-compatible with openimg/node).
+   */
+  resolve(cacheSrc: string | null, token?: symbol) {
     if (!cacheSrc) {
       return;
     }
     const pipeline = this.pipelines.get(cacheSrc);
-    if (pipeline) {
-      pipeline.resolve();
-      this.pipelines.delete(cacheSrc);
+    if (!pipeline) {
+      return;
     }
+    if (token !== undefined && pipeline.token !== token) {
+      return;
+    }
+    pipeline.resolve();
+    this.pipelines.delete(cacheSrc);
   }
 }
 

@@ -1,10 +1,11 @@
 import fs from "node:fs";
 import { Readable } from "node:stream";
 import path from "node:path";
+import { getContentType } from "../utils";
 
-export function exists(path: string): { size: number } | false {
+export function exists(filePath: string): { size: number } | false {
   try {
-    const file = Bun.file(path);
+    const file = Bun.file(filePath);
     if (file.size === 0) {
       return false;
     }
@@ -14,86 +15,144 @@ export function exists(path: string): { size: number } | false {
   }
 }
 
-type CacheMetadata = {
-  [key: string]: {
-    size: number;
-    contentType: string;
-  };
+function detectContentType(header: Uint8Array): string {
+  if (
+    header.length >= 3 &&
+    header[0] === 0xff &&
+    header[1] === 0xd8 &&
+    header[2] === 0xff
+  ) {
+    return getContentType("jpeg");
+  }
+  if (
+    header.length >= 4 &&
+    header[0] === 0x89 &&
+    header[1] === 0x50 &&
+    header[2] === 0x4e &&
+    header[3] === 0x47
+  ) {
+    return getContentType("png");
+  }
+  if (header.length >= 12) {
+    const riff = String.fromCharCode(
+      header[0]!,
+      header[1]!,
+      header[2]!,
+      header[3]!
+    );
+    const webp = String.fromCharCode(
+      header[8]!,
+      header[9]!,
+      header[10]!,
+      header[11]!
+    );
+    if (riff === "RIFF" && webp === "WEBP") {
+      return getContentType("webp");
+    }
+  }
+  if (header.length >= 12) {
+    const ftyp = String.fromCharCode(
+      header[4]!,
+      header[5]!,
+      header[6]!,
+      header[7]!
+    );
+    if (ftyp === "ftyp") {
+      const brand = String.fromCharCode(
+        header[8]!,
+        header[9]!,
+        header[10]!,
+        header[11]!
+      );
+      if (brand === "avif" || brand === "avis") {
+        return getContentType("avif");
+      }
+      if (brand === "heic" || brand === "mif1") {
+        return getContentType("heif");
+      }
+    }
+  }
+  if (header.length >= 4) {
+    const gif = String.fromCharCode(
+      header[0]!,
+      header[1]!,
+      header[2]!,
+      header[3]!
+    );
+    if (gif === "GIF8") {
+      return "image/gif";
+    }
+  }
+  return getContentType(undefined);
+}
+
+export type FileCacheOptions = {
+  touchIntervalMs: number | null;
 };
 
 export class FileCache {
-  #cacheFolder: string;
-  #metadata: CacheMetadata;
+  #touchIntervalMs: number | null;
 
-  constructor(cacheFolder: string) {
-    this.#cacheFolder = cacheFolder;
-    // Ensure cache folder exists
+  constructor(cacheFolder: string, options: FileCacheOptions) {
+    this.#touchIntervalMs = options.touchIntervalMs;
     fs.mkdirSync(cacheFolder, { recursive: true });
-
-    const metadataPath = path.join(this.#cacheFolder, "metadata.json");
-    if (!exists(metadataPath)) {
-      // Create empty metadata file
-      fs.writeFileSync(metadataPath, "{}");
-      this.#metadata = {};
-    } else {
-      const metadata = fs.readFileSync(metadataPath, "utf-8");
-      this.#metadata = JSON.parse(metadata);
-    }
   }
 
-  hasFile(cachePath: string) {
-    // enforce fs and cache to be in sync
-    // otherwise, refetch the file and update the cache
-    return exists(cachePath) && this.#metadata[cachePath];
-  }
-
-  streamFromCache(cachePath: string, headers: Headers) {
-    const meta = this.#metadata[cachePath];
-    if (!meta) {
-      throw new Error("Cache miss for " + cachePath);
-    }
-    headers.set("Content-Type", meta.contentType);
-    headers.set("Content-Length", meta.size.toString());
+  async get(cachePath: string, headers: Headers): Promise<Response | null> {
     const file = Bun.file(cachePath);
-    return new Response(file.stream(), { headers });
+    try {
+      if (!(await file.exists()) || file.size === 0) {
+        return null;
+      }
+      const headerBuf = await file.slice(0, 16).arrayBuffer();
+      if (headerBuf.byteLength === 0) {
+        return null;
+      }
+      headers.set(
+        "Content-Type",
+        detectContentType(new Uint8Array(headerBuf))
+      );
+      this.#maybeTouch(cachePath, file.lastModified);
+      return new Response(file, { headers });
+    } catch {
+      return null;
+    }
   }
 
-  async streamToCache(
-    cachePath: string,
-    readable: Readable,
-    info: { size: number; contentType: string }
-  ) {
+  async write(cachePath: string, readable: Readable): Promise<void> {
     try {
-      fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+      await fs.promises.mkdir(path.dirname(cachePath), { recursive: true });
     } catch {
       // Ignore
     }
 
-    return new Promise<void>((resolve, reject) => {
-      const writeStream = fs.createWriteStream(cachePath);
-      readable
-        .pipe(writeStream)
-        .on("error", reject)
-        .on("finish", () => {
-          this.#recordNewFile(cachePath, info);
-          resolve();
-        });
-    });
+    const tmpPath = `${cachePath}.${crypto.randomUUID()}.tmp`;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const writeStream = fs.createWriteStream(tmpPath);
+        const onError = (err: Error) => {
+          reject(err);
+        };
+        readable.on("error", onError);
+        writeStream.on("error", onError);
+        readable.pipe(writeStream).on("finish", () => resolve());
+      });
+      await fs.promises.rename(tmpPath, cachePath);
+    } catch (e) {
+      await fs.promises.unlink(tmpPath).catch(() => {});
+      throw e;
+    }
   }
 
-  #recordNewFile(
-    cachePath: string,
-    info: { size: number; contentType: string }
-  ) {
-    this.#metadata[cachePath] = {
-      size: info.size,
-      contentType: info.contentType,
-    };
-    this.#writeMetadata();
-  }
-
-  #writeMetadata() {
-    const metadataPath = path.join(this.#cacheFolder, "metadata.json");
-    fs.writeFileSync(metadataPath, JSON.stringify(this.#metadata, null, 2));
+  #maybeTouch(cachePath: string, lastModified: number) {
+    if (this.#touchIntervalMs == null) {
+      return;
+    }
+    const now = Date.now();
+    if (now - lastModified <= this.#touchIntervalMs) {
+      return;
+    }
+    const seconds = now / 1000;
+    fs.promises.utimes(cachePath, seconds, seconds).catch(() => {});
   }
 }

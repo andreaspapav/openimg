@@ -1,5 +1,17 @@
 # Changelog
 
+# Unreleased
+
+## openimg/bun
+
+- Remove `metadata.json` from the disk cache. The filesystem is the only index: a hit is "does this file exist?". Existing cached images remain valid; you can delete any leftover `metadata.json` by hand.
+- Detect `Content-Type` from the file's magic bytes (works for extensionless cache paths). Serve with `Response(Bun.file(...))`.
+- Write via a unique `*.tmp` file then rename, so readers never see a partial file.
+- Fix `PipelineLock` so a timed-out request cannot release a newer lock (token-based resolve).
+- New opt-in `touchCacheOnHit`: update mtime on hit (throttled) so external cleanup can treat mtime as "last used".
+- New opt-in `maxConcurrentTransforms`: cap concurrent fetch+sharp work; cache hits never queue.
+- See [Cache maintenance](../../docs/guides/cache-maintenance.md).
+
 # 1.1.1
 
 ## openimg/react
