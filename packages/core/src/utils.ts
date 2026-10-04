@@ -119,6 +119,10 @@ export type GetSharpPipeline = (
  * - getImgSource: Provide a custom getImgSource function to map the request to a source path or url to the retrieve the original image.
  * - getImgParams: Provide a custom getImgParams function for more control over where to retrieve the image parameters from the request.
  * - touchCacheOnHit: **Bun only.** When true (24h interval) or `{ intervalMs }`, update the cached file's mtime on hit if older than the interval so external cleanup can treat mtime as "last used". Default: false. Ignored by openimg/node.
+ * - fetchTimeoutMs: **Bun only.** Abort fetching a remote source image (including its body) after this many ms. Default: no timeout.
+ * - maxSourceBytes: **Bun only.** Reject source images larger than this many bytes before they are buffered for decoding. Default: no limit.
+ * - limitInputPixels: **Bun only.** Passed to sharp for the default pipeline; source images with more pixels are rejected. Custom pipelines set their own. Default: sharp's default (268402689).
+ * - failedImageTtlMs: **Bun only.** Return error responses instead of throwing when a source image is broken, too large, missing, or can't be fetched. Broken, too large and missing (404/410) sources are remembered for this many ms so repeat requests skip the work. Default: unset (throw, as before).
  * - maxConcurrentTransforms: **Bun only.** Cap concurrent fetch+sharp work. Cache hits never queue. Queued requests whose client disconnected are skipped with a 499. Default: unlimited. Must be an integer ≥ 1. Ignored by openimg/node.
  */
 export type Config = {
@@ -132,6 +136,14 @@ export type Config = {
   touchCacheOnHit?: boolean | { intervalMs: number };
   /** Bun only. Ignored by openimg/node. */
   maxConcurrentTransforms?: number;
+  /** Bun only. Ignored by openimg/node. */
+  fetchTimeoutMs?: number;
+  /** Bun only. Ignored by openimg/node. */
+  maxSourceBytes?: number;
+  /** Bun only. Ignored by openimg/node. */
+  limitInputPixels?: number;
+  /** Bun only. Ignored by openimg/node. */
+  failedImageTtlMs?: number;
 };
 
 export function fromWebStream(stream: ReadableStream): Readable {
@@ -335,8 +347,16 @@ export function parseUrl(src: string) {
   return new URL(src);
 }
 
-export function getDefaultSharpPipeline(params: ImgParams) {
-  const pipeline = sharp().autoOrient();
+export function getDefaultSharpPipeline(
+  params: ImgParams,
+  options: { limitInputPixels?: number } = {}
+) {
+  // sharp(undefined) throws "Invalid input", so only pass options when set
+  const pipeline = (
+    options.limitInputPixels !== undefined
+      ? sharp({ limitInputPixels: options.limitInputPixels })
+      : sharp()
+  ).autoOrient();
   if (params.format === "avif") {
     pipeline.avif();
   } else if (params.format === "webp") {

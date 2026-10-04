@@ -117,6 +117,43 @@ getImgResponse(request, { maxConcurrentTransforms: 2 });
 
 Requests beyond the limit wait in a first-in, first-out queue. When a request's turn comes and its client has already disconnected (`request.signal` is aborted), the transform is skipped and the request returns `499`, unless another connected request is waiting for the same image. Note that `Bun.serve` closes connections that send nothing for `idleTimeout` seconds (default 10), which also aborts queued requests. Raise `idleTimeout` in your server if transforms can queue for longer.
 
+#### fetchTimeoutMs: number (Bun only)
+
+Defaults to no timeout. Aborts fetching a remote source image after this many milliseconds, including downloading its body. Without it, a slow source server can hold a transform slot (see `maxConcurrentTransforms`) indefinitely.
+
+#### maxSourceBytes: number (Bun only)
+
+Defaults to no limit. Rejects source images larger than this many bytes. sharp holds the whole source image in memory before decoding it, so this caps that memory per transform. Remote sources are rejected from their `Content-Length` before downloading; sources without one are counted while streaming.
+
+#### limitInputPixels: number (Bun only)
+
+Defaults to sharp's default (268402689 pixels, about 16384 x 16384). Source images with more pixels are rejected before decoding. A decoded image takes roughly 3–4 bytes per pixel, so lowering this (for example to `50_000_000`) caps decode memory on small machines. Applies to the default pipeline; custom pipelines pass `limitInputPixels` to `sharp()` themselves.
+
+#### failedImageTtlMs: number (Bun only)
+
+Defaults to unset: failures throw, as before. When set, failures return a response instead:
+
+| Failure                                                                                | Status      | Remembered |
+| -------------------------------------------------------------------------------------- | ----------- | ---------- |
+| Source image can't be decoded, exceeds `limitInputPixels`, or exceeds `maxSourceBytes` | `422`       | yes        |
+| Remote source returns `404` or `410`                                                   | same status | yes        |
+| Remote source times out (`fetchTimeoutMs`)                                             | `504`       | no         |
+| Remote source can't be fetched (network error)                                         | `502`       | no         |
+
+Remembered failures are kept in memory (at most 1000 entries, oldest dropped first) for `failedImageTtlMs` milliseconds, so repeat requests return the same status without fetching or decoding the source again. They are sent with `Cache-Control: public, max-age=<ttl>` so a CDN can absorb repeats too; other failures are sent with `no-store`. Error responses never include `config.headers`, so long-lived cache headers meant for images don't apply to them. Other errors, such as failing to write the cache, still throw.
+
+Note that some CDNs don't cache `422` responses regardless of `Cache-Control` (Cloudflare caches only some status codes by default). The in-memory list works either way.
+
+```typescript
+getImgResponse(request, {
+  maxConcurrentTransforms: 2,
+  fetchTimeoutMs: 15_000,
+  maxSourceBytes: 25_000_000,
+  limitInputPixels: 50_000_000,
+  failedImageTtlMs: 60 * 60 * 1000,
+});
+```
+
 #### allowlistedOrigins: string[] | ['*']
 
 List of allowed remote origins. Defaults to `[]`, which means no remote origins are allowed and images will not be fetched from remote locations. Any attempt to query via absolute URLs will return a 403 response. Instead, only relative pathnames are allowed (e.g., `/cat.png`) for local images hosted on the server.

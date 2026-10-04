@@ -1,7 +1,14 @@
 import { createReadStream } from "fs";
 import { PassThrough, Readable, pipeline as streamPipeline } from "node:stream";
 import sharp from "sharp";
-import { exists, FileCache } from "./utils";
+import {
+  createByteLimiter,
+  exists,
+  FailedImages,
+  failureResponse,
+  FileCache,
+  SourceTooLargeError,
+} from "./utils";
 import invariant, {
   Config,
   DEFAULT_CACHE_FOLDER,
@@ -21,6 +28,7 @@ import invariant, {
 const pipelineLock = new PipelineLock();
 const caches = new Map<string, FileCache>();
 const semaphores = new Map<number, Semaphore>();
+const failedImages = new FailedImages();
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -62,6 +70,47 @@ function getSemaphore(limit: number): Semaphore {
   return semaphore;
 }
 
+type Failure = { status: number; statusText: string; remember: boolean };
+
+/**
+ * Maps errors from the source or sharp to an HTTP failure. Returns null for
+ * anything else (e.g. a failing cache write), which is still thrown.
+ */
+function classifyFailure(
+  error: unknown,
+  sourceError: unknown,
+  sharpError: unknown
+): Failure | null {
+  const cause = sourceError ?? error;
+  if (cause instanceof SourceTooLargeError) {
+    return {
+      status: 422,
+      statusText: "Source image too large",
+      remember: true,
+    };
+  }
+  if (sourceError !== undefined) {
+    const name = sourceError instanceof Error ? sourceError.name : "";
+    return name === "TimeoutError" || name === "AbortError"
+      ? { status: 504, statusText: "Source image timed out", remember: false }
+      : {
+          status: 502,
+          statusText: "Source image fetch failed",
+          remember: false,
+        };
+  }
+  if (sharpError !== undefined && error === sharpError) {
+    return { status: 422, statusText: "Unprocessable image", remember: true };
+  }
+  return null;
+}
+
+function assertPositive(name: string, value: number | undefined) {
+  if (value !== undefined) {
+    invariant(value > 0, `${name} must be a positive number`);
+  }
+}
+
 function resolveTouchInterval(
   touchCacheOnHit: Config["touchCacheOnHit"]
 ): number | null {
@@ -93,6 +142,10 @@ export async function getImgResponse(request: Request, config: Config = {}) {
       "maxConcurrentTransforms must be an integer >= 1"
     );
   }
+  assertPositive("fetchTimeoutMs", config.fetchTimeoutMs);
+  assertPositive("maxSourceBytes", config.maxSourceBytes);
+  assertPositive("limitInputPixels", config.limitInputPixels);
+  assertPositive("failedImageTtlMs", config.failedImageTtlMs);
 
   // Get image parameters (src, width, height, fit, format) from the request
   const paramsRes = config.getImgParams
@@ -171,6 +224,18 @@ export async function getImgResponse(request: Request, config: Config = {}) {
   let releaseSemaphoreInFinally = false;
 
   const limitTransforms = config.maxConcurrentTransforms !== undefined;
+  const failedImageTtlMs = config.failedImageTtlMs;
+  const maxSourceBytes = config.maxSourceBytes;
+  // Set by stream listeners so a failure can be attributed to the source
+  // image (fetch/read) or to sharp (decode/encode)
+  let sourceError: unknown;
+  let sharpError: unknown;
+
+  const rememberFailure = (status: number, statusText: string) => {
+    if (cachePath && failedImageTtlMs !== undefined) {
+      failedImages.set(cachePath, status, statusText, failedImageTtlMs);
+    }
+  };
 
   try {
     if (useCache) {
@@ -192,6 +257,17 @@ export async function getImgResponse(request: Request, config: Config = {}) {
         // Another request may have taken the lock while we read the cache
         if (pipelineLock.get(cachePath)) {
           continue;
+        }
+
+        // This source failed recently; don't fetch and decode it again
+        const failed =
+          failedImageTtlMs !== undefined ? failedImages.get(cachePath) : null;
+        if (failed) {
+          return failureResponse(
+            failed.status,
+            failed.statusText,
+            Math.ceil((failed.expiresAt - Date.now()) / 1000)
+          );
         }
 
         // Register ongoing write to the cache file. When transforms are
@@ -228,20 +304,57 @@ export async function getImgResponse(request: Request, config: Config = {}) {
 
     let readStream: Readable;
     if (source.type === "fetch") {
-      const fetchRes = await fetch(source.url, { headers: source.headers });
-      if (!fetchRes.ok || !fetchRes.body) {
-        return new Response(null, {
-          status: fetchRes.status || 404,
-          statusText: fetchRes.statusText || "Image not found",
+      let fetchRes: Response;
+      try {
+        // The timeout signal also aborts the body stream mid-download
+        fetchRes = await fetch(source.url, {
+          headers: source.headers,
+          signal:
+            config.fetchTimeoutMs !== undefined
+              ? AbortSignal.timeout(config.fetchTimeoutMs)
+              : undefined,
         });
+      } catch (e) {
+        sourceError = e;
+        throw e;
+      }
+      if (!fetchRes.ok || !fetchRes.body) {
+        // Release the connection instead of leaving the body unread
+        await fetchRes.body?.cancel().catch(() => {});
+        const status = fetchRes.status || 404;
+        const statusText = fetchRes.statusText || "Image not found";
+        if (
+          failedImageTtlMs !== undefined &&
+          (status === 404 || status === 410)
+        ) {
+          rememberFailure(status, statusText);
+          return failureResponse(
+            status,
+            statusText,
+            Math.ceil(failedImageTtlMs / 1000)
+          );
+        }
+        return new Response(null, { status, statusText });
+      }
+      const contentLength = Number(fetchRes.headers.get("content-length"));
+      if (maxSourceBytes !== undefined && contentLength > maxSourceBytes) {
+        // Reject before downloading anything
+        await fetchRes.body.cancel().catch(() => {});
+        sourceError = new SourceTooLargeError(maxSourceBytes);
+        throw sourceError;
       }
       readStream = fromWebStream(fetchRes.body);
     } else if (source.type === "fs") {
-      if (!exists(source.path)) {
+      const file = exists(source.path);
+      if (!file) {
         return new Response(null, {
           status: 404,
           statusText: "Image not found",
         });
+      }
+      if (maxSourceBytes !== undefined && file.size > maxSourceBytes) {
+        sourceError = new SourceTooLargeError(maxSourceBytes);
+        throw sourceError;
       }
       readStream = createReadStream(source.path);
     } else {
@@ -259,8 +372,24 @@ export async function getImgResponse(request: Request, config: Config = {}) {
     if (sharpConfig) {
       pipeline = sharpConfig.pipeline;
     } else {
-      pipeline = getDefaultSharpPipeline(params);
+      pipeline = getDefaultSharpPipeline(params, {
+        limitInputPixels: config.limitInputPixels,
+      });
     }
+
+    // Registered before streamPipeline wires up the streams, so a source error
+    // is recorded before it is forwarded into sharp
+    readStream.once("error", (err) => {
+      sourceError ??= err;
+    });
+    const limiter =
+      maxSourceBytes !== undefined ? createByteLimiter(maxSourceBytes) : null;
+    limiter?.once("error", (err) => {
+      sourceError ??= err;
+    });
+    pipeline.once("error", (err) => {
+      sharpError ??= err;
+    });
 
     const infoPromise = new Promise<sharp.OutputInfo>((resolve, reject) => {
       pipeline.once("info", resolve);
@@ -274,9 +403,20 @@ export async function getImgResponse(request: Request, config: Config = {}) {
     // stream (and destroys all of them), so neither the info promise nor the
     // cache write can wait forever on a failed transform.
     const outputStream = new PassThrough();
-    streamPipeline(readStream, pipeline, outputStream, () => {
+    const onPipelineDone = () => {
       // Errors surface through infoPromise and outputStream
-    });
+    };
+    if (limiter) {
+      streamPipeline(
+        readStream,
+        limiter,
+        pipeline,
+        outputStream,
+        onPipelineDone
+      );
+    } else {
+      streamPipeline(readStream, pipeline, outputStream, onPipelineDone);
+    }
 
     const outputImgInfo = await infoPromise;
 
@@ -312,6 +452,19 @@ export async function getImgResponse(request: Request, config: Config = {}) {
       headers,
     });
   } catch (e: unknown) {
+    if (failedImageTtlMs !== undefined) {
+      const failure = classifyFailure(e, sourceError, sharpError);
+      if (failure) {
+        if (failure.remember) {
+          rememberFailure(failure.status, failure.statusText);
+        }
+        return failureResponse(
+          failure.status,
+          failure.statusText,
+          failure.remember ? Math.ceil(failedImageTtlMs / 1000) : null
+        );
+      }
+    }
     throw new Error(`Error while processing the image request`, {
       cause: e,
     });

@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { Readable } from "node:stream";
+import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { BunFile } from "bun";
 import path from "node:path";
@@ -148,4 +148,100 @@ export class FileCache {
     const seconds = now / 1000;
     fs.promises.utimes(cachePath, seconds, seconds).catch(() => {});
   }
+}
+
+/**
+ * Thrown when a source image is larger than `maxSourceBytes`.
+ */
+export class SourceTooLargeError extends Error {
+  constructor(maxBytes: number) {
+    super(`Source image exceeds maxSourceBytes (${maxBytes} bytes)`);
+    this.name = "SourceTooLargeError";
+  }
+}
+
+/**
+ * Passes chunks through until more than maxBytes have been seen, then errors.
+ * Covers sources without a (truthful) Content-Length.
+ */
+export function createByteLimiter(maxBytes: number): Transform {
+  let total = 0;
+  return new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      total += chunk.length;
+      if (total > maxBytes) {
+        callback(new SourceTooLargeError(maxBytes));
+        return;
+      }
+      callback(null, chunk);
+    },
+  });
+}
+
+type FailedImage = {
+  status: number;
+  statusText: string;
+  expiresAt: number;
+};
+
+/**
+ * Remembers recently failed cache paths so repeat requests for a broken source
+ * image don't fetch and decode it again. Bounded: the oldest entry is dropped
+ * once `maxEntries` is reached, so memory stays flat.
+ */
+export class FailedImages {
+  #entries = new Map<string, FailedImage>();
+  #maxEntries: number;
+
+  constructor(maxEntries = 1000) {
+    this.#maxEntries = maxEntries;
+  }
+
+  get(cachePath: string): FailedImage | null {
+    const entry = this.#entries.get(cachePath);
+    if (!entry) {
+      return null;
+    }
+    if (entry.expiresAt <= Date.now()) {
+      this.#entries.delete(cachePath);
+      return null;
+    }
+    return entry;
+  }
+
+  set(cachePath: string, status: number, statusText: string, ttlMs: number) {
+    this.#entries.delete(cachePath);
+    this.#entries.set(cachePath, {
+      status,
+      statusText,
+      expiresAt: Date.now() + ttlMs,
+    });
+    if (this.#entries.size > this.#maxEntries) {
+      const oldest = this.#entries.keys().next().value;
+      if (oldest !== undefined) {
+        this.#entries.delete(oldest);
+      }
+    }
+  }
+}
+
+/**
+ * Error responses never carry config.headers, which usually hold long-lived
+ * Cache-Control headers meant for successful images.
+ */
+export function failureResponse(
+  status: number,
+  statusText: string,
+  maxAgeSeconds: number | null
+) {
+  return new Response(null, {
+    status,
+    statusText,
+    headers: {
+      "Cache-Control":
+        maxAgeSeconds === null
+          ? "no-store"
+          : `public, max-age=${maxAgeSeconds}`,
+    },
+  });
 }
