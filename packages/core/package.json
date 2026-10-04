@@ -1,10 +1,10 @@
 {
-  "name": "openimg",
-  "version": "1.1.1",
-  "homepage": "https://github.com/andrelandgraf/openimg",
+  "name": "@andreaspapav/openimg",
+  "version": "1.2.0",
+  "homepage": "https://github.com/andreaspapav/openimg",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/andrelandgraf/openimg.git"
+    "url": "git+https://github.com/andreaspapav/openimg.git"
   },
   "license": "MIT",
   "author": "Andre Landgraf <andre.timo.landgraf@gmail.com> (https://andrelandgraf.com)",
