@@ -25,7 +25,9 @@ function pngBytes(): Buffer {
 }
 
 function jpegBytes(): Buffer {
-  return Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]);
+  return Buffer.from([
+    0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46,
+  ]);
 }
 
 function webpBytes(): Buffer {
@@ -44,7 +46,10 @@ function avifBytes(): Buffer {
 
 test("bun FileCache: get returns null for missing file", async () => {
   const cache = new FileCache(CACHE_ROOT, { touchIntervalMs: null });
-  const res = await cache.get(path.join(CACHE_ROOT, "missing.webp"), new Headers());
+  const res = await cache.get(
+    path.join(CACHE_ROOT, "missing.webp"),
+    new Headers()
+  );
   expect(res).toBeNull();
 });
 

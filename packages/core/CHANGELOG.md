@@ -9,7 +9,7 @@
 - Write via a unique `*.tmp` file then rename, so readers never see a partial file.
 - Fix `PipelineLock` so a timed-out request cannot release a newer lock (token-based resolve).
 - New opt-in `touchCacheOnHit`: update mtime on hit (throttled) so external cleanup can treat mtime as "last used".
-- New opt-in `maxConcurrentTransforms`: cap concurrent fetch+sharp work; cache hits never queue.
+- New opt-in `maxConcurrentTransforms`: cap concurrent fetch+sharp work; cache hits never queue. Queued requests whose client disconnected are skipped (`499`) unless a connected request waits for the same image.
 - See [Cache maintenance](../../docs/guides/cache-maintenance.md).
 
 # 1.1.1

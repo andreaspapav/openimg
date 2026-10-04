@@ -115,6 +115,8 @@ Defaults to unlimited. Caps how many fetch+sharp transforms run at once. Cache h
 getImgResponse(request, { maxConcurrentTransforms: 2 });
 ```
 
+Requests beyond the limit wait in a first-in, first-out queue. When a request's turn comes and its client has already disconnected (`request.signal` is aborted), the transform is skipped and the request returns `499`, unless another connected request is waiting for the same image. Note that `Bun.serve` closes connections that send nothing for `idleTimeout` seconds (default 10), which also aborts queued requests. Raise `idleTimeout` in your server if transforms can queue for longer.
+
 #### allowlistedOrigins: string[] | ['*']
 
 List of allowed remote origins. Defaults to `[]`, which means no remote origins are allowed and images will not be fetched from remote locations. Any attempt to query via absolute URLs will return a 403 response. Instead, only relative pathnames are allowed (e.g., `/cat.png`) for local images hosted on the server.

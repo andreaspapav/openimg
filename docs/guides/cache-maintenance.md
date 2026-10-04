@@ -31,14 +31,11 @@ Same recipe inside the image server process (still only on one instance if the v
 ```typescript
 const cacheFolder = "./data/images";
 
-setInterval(
-  async () => {
-    const { $ } = await import("bun");
-    await $`find ${cacheFolder} -type f ! -name '*.tmp' -mtime +30 -delete`;
-    await $`find ${cacheFolder} -type f -name '*.tmp' -mmin +60 -delete`;
-  },
-  24 * 60 * 60 * 1000
-);
+setInterval(async () => {
+  const { $ } = await import("bun");
+  await $`find ${cacheFolder} -type f ! -name '*.tmp' -mtime +30 -delete`;
+  await $`find ${cacheFolder} -type f -name '*.tmp' -mmin +60 -delete`;
+}, 24 * 60 * 60 * 1000);
 ```
 
 Or walk the tree with `fs` if you prefer not to shell out.

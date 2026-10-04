@@ -2,7 +2,8 @@ import { afterAll, expect, test } from "bun:test";
 import fs from "node:fs";
 import path from "node:path";
 import { Readable } from "node:stream";
-import { getImgResponse } from "openimg/bun";
+import { getImgResponse, type Config } from "openimg/bun";
+import sharp from "sharp";
 
 const ROOT = "./data/cache-behavior";
 
@@ -22,10 +23,9 @@ function freshDir(name: string) {
 
 test("bun cache: metadata.json is never created", async () => {
   const cacheFolder = freshDir("no-meta");
-  const res = await getImgResponse(
-    req("?src=/cat.png&w=50&h=50&format=webp"),
-    { cacheFolder }
-  );
+  const res = await getImgResponse(req("?src=/cat.png&w=50&h=50&format=webp"), {
+    cacheFolder,
+  });
   expect(res.status).toBe(200);
   expect(fs.existsSync(path.join(cacheFolder, "metadata.json"))).toBe(false);
 });
@@ -237,4 +237,169 @@ test("bun cache: maxConcurrentTransforms serializes transforms; hits stay free",
   expect(hitAndMiss[0]!.status).toBe(200);
   expect(hitAndMiss[1]!.status).toBe(200);
   expect(transformCount).toBe(1);
+});
+
+test("bun cache: concurrent requests for same uncached image run one transform", async () => {
+  const cacheFolder = freshDir("dedupe");
+  let transforms = 0;
+  const cfg = {
+    cacheFolder,
+    getSharpPipeline: () => {
+      const pipeline = sharp().resize(49, 49).webp();
+      // Only the request that holds the lock pipes data through its pipeline
+      pipeline.once("info", () => {
+        transforms++;
+      });
+      return { pipeline, cacheKey: "dedupe-cat" };
+    },
+  };
+  const results = await Promise.all(
+    Array.from({ length: 8 }, () =>
+      getImgResponse(req("?src=/cat.png&w=49&h=49"), cfg)
+    )
+  );
+  for (const r of results) {
+    expect(r.status).toBe(200);
+    await r.arrayBuffer();
+  }
+  expect(transforms).toBe(1);
+});
+
+test("bun cache: corrupt source rejects instead of hanging and frees its transform slot", async () => {
+  const cacheFolder = freshDir("corrupt-source");
+  const cfg = (cacheKey: string, data: Buffer) => ({
+    cacheFolder,
+    maxConcurrentTransforms: 1,
+    getImgSource: () => ({ type: "data" as const, data, cacheKey }),
+  });
+  const garbage = Buffer.from("this is not an image");
+
+  // With maxConcurrentTransforms: 1, a leaked slot would make the valid
+  // request below wait forever and time out the test.
+  for (const key of ["garbage-1", "garbage-2"]) {
+    await expect(
+      getImgResponse(req("?w=50&h=50&format=webp"), cfg(key, garbage))
+    ).rejects.toThrow();
+  }
+
+  const ok = await getImgResponse(
+    req("?w=50&h=50&format=webp"),
+    cfg("valid-after-garbage", fs.readFileSync("./public/cat.png"))
+  );
+  expect(ok.status).toBe(200);
+  expect(ok.headers.get("Content-Type")).toBe("image/webp");
+
+  const leftovers = fs
+    .readdirSync(cacheFolder, { recursive: true })
+    .map(String)
+    .filter((f) => f.endsWith(".tmp") || f.startsWith("garbage"));
+  expect(leftovers).toEqual([]);
+});
+
+test("bun no_cache: corrupt source rejects and frees its transform slot", async () => {
+  const cfg = (data: Buffer) => ({
+    cacheFolder: "no_cache" as const,
+    maxConcurrentTransforms: 1,
+    getImgSource: () => ({ type: "data" as const, data, cacheKey: null }),
+  });
+  await expect(
+    getImgResponse(req("?w=50&h=50&format=webp"), cfg(Buffer.from("nope")))
+  ).rejects.toThrow();
+
+  const ok = await getImgResponse(
+    req("?w=50&h=50&format=webp"),
+    cfg(fs.readFileSync("./public/cat.png"))
+  );
+  expect(ok.status).toBe(200);
+  await ok.arrayBuffer();
+});
+
+function slowSource(delayMs: number) {
+  let started = false;
+  return new Readable({
+    read() {
+      if (started) {
+        return;
+      }
+      started = true;
+      setTimeout(() => {
+        this.push(fs.readFileSync("./public/cat.png"));
+        this.push(null);
+      }, delayMs);
+    },
+  });
+}
+
+function abortTestConfig(cacheFolder: string, transformed: string[]): Config {
+  return {
+    cacheFolder,
+    maxConcurrentTransforms: 1,
+    getImgSource: ({ request }) => {
+      const key = new URL(request.url).searchParams.get("key")!;
+      return {
+        type: "data",
+        data:
+          key === "busy"
+            ? slowSource(150)
+            : fs.readFileSync("./public/cat.png"),
+        cacheKey: key,
+      };
+    },
+    getSharpPipeline: ({ source }) => {
+      const key = source.type === "data" ? source.cacheKey! : "";
+      const pipeline = sharp().resize(30, 30).webp();
+      pipeline.once("info", () => {
+        transformed.push(key);
+      });
+      return { pipeline, cacheKey: key };
+    },
+  };
+}
+
+test("bun cache: queued request whose client disconnected is skipped", async () => {
+  const transformed: string[] = [];
+  const cfg = abortTestConfig(freshDir("abort-skip"), transformed);
+
+  const busy = getImgResponse(req("?key=busy&w=30&h=30"), cfg);
+  await Bun.sleep(20);
+  const controller = new AbortController();
+  const gone = getImgResponse(
+    new Request("http://localhost/?key=gone&w=30&h=30", {
+      signal: controller.signal,
+    }),
+    cfg
+  );
+  await Bun.sleep(20);
+  controller.abort();
+
+  expect((await busy).status).toBe(200);
+  expect((await gone).status).toBe(499);
+  expect(transformed).toEqual(["busy"]);
+});
+
+test("bun cache: disconnected request still transforms when a connected request waits for the same image", async () => {
+  const transformed: string[] = [];
+  const cfg = abortTestConfig(freshDir("abort-waiter"), transformed);
+
+  const busy = getImgResponse(req("?key=busy&w=30&h=30"), cfg);
+  await Bun.sleep(20);
+  const controller = new AbortController();
+  const gone = getImgResponse(
+    new Request("http://localhost/?key=shared&w=30&h=30", {
+      signal: controller.signal,
+    }),
+    cfg
+  );
+  await Bun.sleep(20);
+  // Waits on the lock held by the request that is about to disconnect
+  const waiting = getImgResponse(req("?key=shared&w=30&h=30"), cfg);
+  await Bun.sleep(20);
+  controller.abort();
+
+  expect((await busy).status).toBe(200);
+  await gone;
+  const res = await waiting;
+  expect(res.status).toBe(200);
+  expect(res.headers.get("Content-Type")).toBe("image/webp");
+  expect(transformed).toEqual(["busy", "shared"]);
 });

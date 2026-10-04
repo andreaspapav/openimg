@@ -119,7 +119,7 @@ export type GetSharpPipeline = (
  * - getImgSource: Provide a custom getImgSource function to map the request to a source path or url to the retrieve the original image.
  * - getImgParams: Provide a custom getImgParams function for more control over where to retrieve the image parameters from the request.
  * - touchCacheOnHit: **Bun only.** When true (24h interval) or `{ intervalMs }`, update the cached file's mtime on hit if older than the interval so external cleanup can treat mtime as "last used". Default: false. Ignored by openimg/node.
- * - maxConcurrentTransforms: **Bun only.** Cap concurrent fetch+sharp work. Cache hits never queue. Default: unlimited. Must be an integer ≥ 1. Ignored by openimg/node.
+ * - maxConcurrentTransforms: **Bun only.** Cap concurrent fetch+sharp work. Cache hits never queue. Queued requests whose client disconnected are skipped with a 499. Default: unlimited. Must be an integer ≥ 1. Ignored by openimg/node.
  */
 export type Config = {
   headers?: HeadersInit;
@@ -349,11 +349,23 @@ export function getDefaultSharpPipeline(params: ImgParams) {
   return pipeline;
 }
 
+const PIPELINE_LOCK_TIMEOUT_MS = 10000;
+
+type PipelineLockEntry = {
+  cacheSrc: string;
+  token: symbol;
+  p: Promise<void>;
+  settle: () => void;
+  timeout: ReturnType<typeof setTimeout> | undefined;
+  // Signals of the requests waiting on this lock (see wait())
+  waiters: AbortSignal[];
+};
+
 export class PipelineLock {
-  pipelines = new Map<
-    string,
-    { p: Promise<void>; resolve: () => void; token: symbol }
-  >();
+  // The current lock per cache path (what new requests wait on).
+  pipelines = new Map<string, PipelineLockEntry>();
+  // Every unsettled lock by token, including ones that are no longer current.
+  #byToken = new Map<symbol, PipelineLockEntry>();
 
   get(cacheSrc: string) {
     const pipeline = this.pipelines.get(cacheSrc);
@@ -364,43 +376,82 @@ export class PipelineLock {
   }
 
   /**
-   * Register an in-flight write for cacheSrc. Returns a token that must be
-   * passed to resolve() so a timed-out request cannot release a newer lock.
+   * Like get(), but registers the waiting request's signal so the lock owner
+   * can tell whether anyone still connected is waiting (hasActiveWaiters()).
    */
-  add(cacheSrc: string): symbol {
-    const token = Symbol("pipelineLock");
-    let resolve: () => void;
-    const p = new Promise<void>((r) => {
-      const timeout = setTimeout(() => {
-        this.resolve(cacheSrc, token);
-      }, 10000); // kill lock after 10 seconds
-      resolve = () => {
-        clearTimeout(timeout);
-        r();
-      };
-    });
-    this.pipelines.set(cacheSrc, { p, resolve: resolve!, token });
-    return token;
+  wait(cacheSrc: string, signal: AbortSignal) {
+    const pipeline = this.pipelines.get(cacheSrc);
+    if (pipeline) {
+      pipeline.waiters.push(signal);
+      return pipeline.p;
+    }
+    return null;
+  }
+
+  hasActiveWaiters(token: symbol) {
+    const entry = this.#byToken.get(token);
+    return !!entry && entry.waiters.some((signal) => !signal.aborted);
   }
 
   /**
-   * Release the lock for cacheSrc. When token is provided, only releases if it
-   * matches the current lock (Bun). Without a token, releases unconditionally
-   * (backwards-compatible with openimg/node).
+   * Register an in-flight write for cacheSrc. Returns a token for resolve() and
+   * startTimeout(). With deferTimeout, the 10 second timeout only starts once
+   * startTimeout() is called (e.g. after waiting for a transform slot).
+   */
+  add(cacheSrc: string, options: { deferTimeout?: boolean } = {}): symbol {
+    const token = Symbol("pipelineLock");
+    let settle!: () => void;
+    const p = new Promise<void>((r) => {
+      settle = r;
+    });
+    const entry: PipelineLockEntry = {
+      cacheSrc,
+      token,
+      p,
+      settle,
+      timeout: undefined,
+      waiters: [],
+    };
+    this.pipelines.set(cacheSrc, entry);
+    this.#byToken.set(token, entry);
+    if (!options.deferTimeout) {
+      this.startTimeout(token);
+    }
+    return token;
+  }
+
+  startTimeout(token: symbol) {
+    const entry = this.#byToken.get(token);
+    if (!entry || entry.timeout) {
+      return;
+    }
+    entry.timeout = setTimeout(() => {
+      this.resolve(entry.cacheSrc, token);
+    }, PIPELINE_LOCK_TIMEOUT_MS);
+  }
+
+  /**
+   * Release a lock. With a token, settles exactly that lock (even if a newer
+   * lock replaced it) and never touches another request's lock. Without a
+   * token, releases the current lock for cacheSrc (openimg/node).
    */
   resolve(cacheSrc: string | null, token?: symbol) {
     if (!cacheSrc) {
       return;
     }
-    const pipeline = this.pipelines.get(cacheSrc);
-    if (!pipeline) {
+    const entry =
+      token !== undefined
+        ? this.#byToken.get(token)
+        : this.pipelines.get(cacheSrc);
+    if (!entry) {
       return;
     }
-    if (token !== undefined && pipeline.token !== token) {
-      return;
+    clearTimeout(entry.timeout);
+    entry.settle();
+    this.#byToken.delete(entry.token);
+    if (this.pipelines.get(cacheSrc) === entry) {
+      this.pipelines.delete(cacheSrc);
     }
-    pipeline.resolve();
-    this.pipelines.delete(cacheSrc);
   }
 }
 

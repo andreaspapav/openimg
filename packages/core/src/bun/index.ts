@@ -1,5 +1,5 @@
 import { createReadStream } from "fs";
-import { PassThrough, Readable } from "node:stream";
+import { PassThrough, Readable, pipeline as streamPipeline } from "node:stream";
 import sharp from "sharp";
 import { exists, FileCache } from "./utils";
 import invariant, {
@@ -144,13 +144,16 @@ export async function getImgResponse(request: Request, config: Config = {}) {
     ? config.cacheFolder || DEFAULT_CACHE_FOLDER
     : null;
 
+  let cache: FileCache | undefined;
   if (useCache && cacheFolder) {
-    let cache = caches.get(cacheFolder);
+    // FileCache holds no index, so one instance per folder + touch setting is
+    // cheap and lets configs that share a folder use different settings.
+    const touchIntervalMs = resolveTouchInterval(config.touchCacheOnHit);
+    const cacheId = `${cacheFolder}\0${touchIntervalMs}`;
+    cache = caches.get(cacheId);
     if (!cache) {
-      cache = new FileCache(cacheFolder, {
-        touchIntervalMs: resolveTouchInterval(config.touchCacheOnHit),
-      });
-      caches.set(cacheFolder, cache);
+      cache = new FileCache(cacheFolder, { touchIntervalMs });
+      caches.set(cacheId, cache);
     }
   }
 
@@ -167,30 +170,60 @@ export async function getImgResponse(request: Request, config: Config = {}) {
   let semaphore: Semaphore | null = null;
   let releaseSemaphoreInFinally = false;
 
+  const limitTransforms = config.maxConcurrentTransforms !== undefined;
+
   try {
     if (useCache) {
       invariant(cachePath, "Cache path is required");
-      const lock = pipelineLock.get(cachePath);
-      if (lock) {
-        // Wait for ongoing pipeline to finish that writes to the same cache file
-        await lock;
-      }
-
-      const cache = caches.get(cacheFolder!);
       invariant(cache, "Cache is required");
-      const cached = await cache.get(cachePath, headers);
-      if (cached) {
-        return cached;
-      }
+      while (true) {
+        const lock = pipelineLock.wait(cachePath, request.signal);
+        if (lock) {
+          // Wait for ongoing pipeline to finish that writes to the same cache file
+          await lock;
+          continue;
+        }
 
-      // Register ongoing write to the cache file
-      lockToken = pipelineLock.add(cachePath);
+        const cached = await cache.get(cachePath, headers);
+        if (cached) {
+          return cached;
+        }
+
+        // Another request may have taken the lock while we read the cache
+        if (pipelineLock.get(cachePath)) {
+          continue;
+        }
+
+        // Register ongoing write to the cache file. When transforms are
+        // limited, the lock timeout only starts once we hold a slot, so
+        // waiting in the queue doesn't trigger duplicate transforms.
+        lockToken = pipelineLock.add(cachePath, {
+          deferTimeout: limitTransforms,
+        });
+        break;
+      }
     }
 
-    if (config.maxConcurrentTransforms !== undefined) {
-      semaphore = getSemaphore(config.maxConcurrentTransforms);
+    if (limitTransforms) {
+      semaphore = getSemaphore(config.maxConcurrentTransforms!);
       await semaphore.acquire();
       releaseSemaphoreInFinally = true;
+      if (lockToken !== undefined) {
+        pipelineLock.startTimeout(lockToken);
+      }
+
+      // The client went away while we were queued (disconnect, or Bun's
+      // idleTimeout closed the connection). Give the slot to someone who is
+      // still waiting, unless a connected request is waiting for this image.
+      if (
+        request.signal.aborted &&
+        !(lockToken !== undefined && pipelineLock.hasActiveWaiters(lockToken))
+      ) {
+        return new Response(null, {
+          status: 499,
+          statusText: "Client Closed Request",
+        });
+      }
     }
 
     let readStream: Readable;
@@ -229,21 +262,26 @@ export async function getImgResponse(request: Request, config: Config = {}) {
       pipeline = getDefaultSharpPipeline(params);
     }
 
-    const infoPromise = new Promise<sharp.OutputInfo>((resolve) => {
-      pipeline.on("info", (info) => {
-        resolve(info);
+    const infoPromise = new Promise<sharp.OutputInfo>((resolve, reject) => {
+      pipeline.once("info", resolve);
+      pipeline.once("error", reject);
+      pipeline.once("close", () => {
+        reject(new Error("Sharp pipeline closed before producing output"));
       });
     });
 
-    const transformed = readStream.pipe(pipeline);
+    // stream.pipeline forwards errors from the source and sharp to the output
+    // stream (and destroys all of them), so neither the info promise nor the
+    // cache write can wait forever on a failed transform.
     const outputStream = new PassThrough();
-    transformed.pipe(outputStream);
+    streamPipeline(readStream, pipeline, outputStream, () => {
+      // Errors surface through infoPromise and outputStream
+    });
 
     const outputImgInfo = await infoPromise;
 
     if (useCache) {
       invariant(cachePath, "Cache path is required");
-      const cache = caches.get(cacheFolder!);
       invariant(cache, "Cache is required");
       await cache.write(cachePath, outputStream);
       const cached = await cache.get(cachePath, headers);

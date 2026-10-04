@@ -1,5 +1,7 @@
 import fs from "node:fs";
 import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import type { BunFile } from "bun";
 import path from "node:path";
 import { getContentType } from "../utils";
 
@@ -100,23 +102,20 @@ export class FileCache {
 
   async get(cachePath: string, headers: Headers): Promise<Response | null> {
     const file = Bun.file(cachePath);
+    let header: Uint8Array;
     try {
-      if (!(await file.exists()) || file.size === 0) {
-        return null;
-      }
-      const headerBuf = await file.slice(0, 16).arrayBuffer();
-      if (headerBuf.byteLength === 0) {
-        return null;
-      }
-      headers.set(
-        "Content-Type",
-        detectContentType(new Uint8Array(headerBuf))
-      );
-      this.#maybeTouch(cachePath, file.lastModified);
-      return new Response(file, { headers });
+      // One read answers "is it cached?" (missing file rejects, empty file
+      // returns no bytes) and gives us the magic bytes for Content-Type.
+      header = new Uint8Array(await file.slice(0, 16).arrayBuffer());
     } catch {
       return null;
     }
+    if (header.byteLength === 0) {
+      return null;
+    }
+    headers.set("Content-Type", detectContentType(header));
+    this.#maybeTouch(cachePath, file);
+    return new Response(file, { headers });
   }
 
   async write(cachePath: string, readable: Readable): Promise<void> {
@@ -128,15 +127,9 @@ export class FileCache {
 
     const tmpPath = `${cachePath}.${crypto.randomUUID()}.tmp`;
     try {
-      await new Promise<void>((resolve, reject) => {
-        const writeStream = fs.createWriteStream(tmpPath);
-        const onError = (err: Error) => {
-          reject(err);
-        };
-        readable.on("error", onError);
-        writeStream.on("error", onError);
-        readable.pipe(writeStream).on("finish", () => resolve());
-      });
+      // pipeline destroys both streams on error, so the temp file is closed
+      // before we unlink it
+      await pipeline(readable, fs.createWriteStream(tmpPath));
       await fs.promises.rename(tmpPath, cachePath);
     } catch (e) {
       await fs.promises.unlink(tmpPath).catch(() => {});
@@ -144,12 +137,12 @@ export class FileCache {
     }
   }
 
-  #maybeTouch(cachePath: string, lastModified: number) {
+  #maybeTouch(cachePath: string, file: BunFile) {
     if (this.#touchIntervalMs == null) {
       return;
     }
     const now = Date.now();
-    if (now - lastModified <= this.#touchIntervalMs) {
+    if (now - file.lastModified <= this.#touchIntervalMs) {
       return;
     }
     const seconds = now / 1000;
