@@ -19,6 +19,7 @@ import invariant, {
   getImgParams,
   getImgSource,
   ImgParams,
+  ImgRequestInfo,
   ImgSource,
   PipelineLock,
   toWebStream,
@@ -133,7 +134,26 @@ function resolveTouchInterval(
  * @returns {Promise<Response>} - a promise resolving to a Response object
  */
 export async function getImgResponse(request: Request, config: Config = {}) {
+  const started = performance.now();
   const headers = new Headers(config.headers);
+
+  const durationMs = () => Math.round(performance.now() - started);
+
+  const notifyRequest = (
+    info: Omit<ImgRequestInfo, "durationMs"> & { durationMs?: number }
+  ) => {
+    if (!config.onRequest) {
+      return;
+    }
+    try {
+      config.onRequest({
+        ...info,
+        durationMs: info.durationMs ?? durationMs(),
+      });
+    } catch {
+      // Logging must not break serving
+    }
+  };
 
   if (config.maxConcurrentTransforms !== undefined) {
     invariant(
@@ -251,17 +271,14 @@ export async function getImgResponse(request: Request, config: Config = {}) {
 
         const cached = await cache.get(cachePath, headers);
         if (cached) {
-          if (config.onCacheHit) {
-            try {
-              config.onCacheHit({
-                cachePath,
-                contentType: cached.response.headers.get("Content-Type"),
-                size: cached.size,
-              });
-            } catch {
-              // Logging must not break serving
-            }
-          }
+          const contentType = cached.response.headers.get("Content-Type");
+          notifyRequest({
+            cache: "hit",
+            cachePath,
+            contentType,
+            size: cached.size,
+            status: 200,
+          });
           return cached.response;
         }
 
@@ -437,6 +454,13 @@ export async function getImgResponse(request: Request, config: Config = {}) {
       await cache.write(cachePath, outputStream);
       const cached = await cache.get(cachePath, headers);
       invariant(cached, "Cache write succeeded but read returned null");
+      notifyRequest({
+        cache: "miss",
+        cachePath,
+        contentType: cached.response.headers.get("Content-Type"),
+        size: cached.size,
+        status: 200,
+      });
       return cached.response;
     }
 
@@ -457,8 +481,16 @@ export async function getImgResponse(request: Request, config: Config = {}) {
       outputStream.on("error", release);
     }
 
-    headers.set("Content-Type", getContentType(outputImgInfo.format));
+    const contentType = getContentType(outputImgInfo.format);
+    headers.set("Content-Type", contentType);
     headers.set("Content-Length", outputImgInfo.size.toString());
+    notifyRequest({
+      cache: "bypass",
+      cachePath: null,
+      contentType,
+      size: outputImgInfo.size,
+      status: 200,
+    });
     return new Response(toWebStream(outputStream), {
       headers,
     });

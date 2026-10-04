@@ -1,5 +1,4 @@
 export type {
-  CacheHitInfo,
   Config,
   Fit,
   Format,
@@ -10,6 +9,7 @@ export type {
   GetSharpPipelineArgs,
   GetSharpPipeline,
   ImgParams,
+  ImgRequestInfo,
   ImgSource,
   SharpConfig,
 } from "./utils";

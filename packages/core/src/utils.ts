@@ -119,7 +119,7 @@ export type GetSharpPipeline = (
  * - getImgSource: Provide a custom getImgSource function to map the request to a source path or url to the retrieve the original image.
  * - getImgParams: Provide a custom getImgParams function for more control over where to retrieve the image parameters from the request.
  * - touchCacheOnHit: **Bun only.** When true (24h interval) or `{ intervalMs }`, update the cached file's mtime on hit if older than the interval so external cleanup can treat mtime as "last used". Default: false. Ignored by openimg/node.
- * - onCacheHit: **Bun only.** Called when a response is served from the disk cache (not on miss/write). Use for logging without re-checking the filesystem in your server. Default: unset. Ignored by openimg/node.
+ * - onRequest: **Bun only.** Called once per completed image response (cache hit, cache miss/write, or no_cache) with durationMs and cache outcome. Use this for unified request logging. Default: unset. Ignored by openimg/node.
  * - fetchTimeoutMs: **Bun only.** Abort fetching a remote source image (including its body) after this many ms. Default: no timeout.
  * - maxSourceBytes: **Bun only.** Reject source images larger than this many bytes before they are buffered for decoding. Default: no limit.
  * - limitInputPixels: **Bun only.** Passed to sharp for the default pipeline; source images with more pixels are rejected. Custom pipelines set their own. Default: sharp's default (268402689).
@@ -128,13 +128,18 @@ export type GetSharpPipeline = (
  */
 
 /**
- * Info passed to Config.onCacheHit when openimg/bun serves a file from disk cache.
+ * Info passed to Config.onRequest when openimg/bun finishes an image response.
+ * - hit: served from disk cache
+ * - miss: transformed and written to cache (or read back after write)
+ * - bypass: cacheFolder is "no_cache"
  */
-export type CacheHitInfo = {
-  cachePath: string;
+export type ImgRequestInfo = {
+  cache: "hit" | "miss" | "bypass";
+  durationMs: number;
+  cachePath: string | null;
   contentType: string | null;
-  /** Cached file size in bytes (from Bun.file). */
-  size: number;
+  size: number | null;
+  status: number;
 };
 
 export type Config = {
@@ -147,7 +152,7 @@ export type Config = {
   /** Bun only. Ignored by openimg/node. */
   touchCacheOnHit?: boolean | { intervalMs: number };
   /** Bun only. Ignored by openimg/node. */
-  onCacheHit?: (info: CacheHitInfo) => void;
+  onRequest?: (info: ImgRequestInfo) => void;
   /** Bun only. Ignored by openimg/node. */
   maxConcurrentTransforms?: number;
   /** Bun only. Ignored by openimg/node. */

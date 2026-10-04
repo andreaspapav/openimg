@@ -404,26 +404,40 @@ test("bun cache: disconnected request still transforms when a connected request 
   expect(transformed).toEqual(["busy", "shared"]);
 });
 
-test("bun cache: onCacheHit fires only on disk cache hits, not on miss/write", async () => {
-  const cacheFolder = freshDir("on-cache-hit");
-  const hits: Array<{ cachePath: string; contentType: string | null; size: number }> =
-    [];
+test("bun cache: onRequest reports miss then hit with durationMs", async () => {
+  const cacheFolder = freshDir("on-request");
+  const events: Array<{
+    cache: string;
+    durationMs: number;
+    size: number | null;
+    status: number;
+  }> = [];
   const cfg = {
     cacheFolder,
-    onCacheHit: (info: (typeof hits)[number]) => {
-      hits.push(info);
+    onRequest: (info: (typeof events)[number] & { contentType: string | null }) => {
+      events.push({
+        cache: info.cache,
+        durationMs: info.durationMs,
+        size: info.size,
+        status: info.status,
+      });
     },
   };
-  const qs = "?src=/cat.png&w=55&h=55&format=webp";
+  const qs = "?src=/cat.png&w=56&h=56&format=webp";
 
   const miss = await getImgResponse(req(qs), cfg);
   expect(miss.status).toBe(200);
-  expect(hits).toEqual([]);
+  expect(events).toHaveLength(1);
+  expect(events[0]!.cache).toBe("miss");
+  expect(events[0]!.status).toBe(200);
+  expect(events[0]!.size).toBeGreaterThan(0);
+  expect(events[0]!.durationMs).toBeGreaterThanOrEqual(0);
 
   const hit = await getImgResponse(req(qs), cfg);
   expect(hit.status).toBe(200);
-  expect(hits).toHaveLength(1);
-  expect(hits[0]!.contentType).toBe("image/webp");
-  expect(hits[0]!.size).toBeGreaterThan(0);
-  expect(hits[0]!.cachePath).toContain("w-55");
+  expect(events).toHaveLength(2);
+  expect(events[1]!.cache).toBe("hit");
+  expect(events[1]!.durationMs).toBeGreaterThanOrEqual(0);
+  // Hits should be faster than the transform that wrote the file
+  expect(events[1]!.durationMs).toBeLessThan(events[0]!.durationMs);
 });

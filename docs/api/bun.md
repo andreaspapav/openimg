@@ -107,14 +107,16 @@ getImgResponse(request, { touchCacheOnHit: true });
 getImgResponse(request, { touchCacheOnHit: { intervalMs: 60 * 60 * 1000 } });
 ```
 
-#### onCacheHit: (info: CacheHitInfo) => void (Bun only)
+#### onRequest: (info: ImgRequestInfo) => void (Bun only)
 
-Defaults to unset. Called when a response is served from the disk cache (not on a miss that writes a new file). Use this for logging instead of re-checking the filesystem in your server. Errors thrown from the callback are ignored so logging cannot break the response.
+Defaults to unset. Called once when an image response is ready — cache hit, cache miss (after transform + write), or `no_cache` bypass. Includes `durationMs` (wall time inside `getImgResponse`) and `cache: "hit" | "miss" | "bypass"`. Use this for unified request logging in your server. Errors thrown from the callback are ignored.
 
 ```typescript
 getImgResponse(request, {
-  onCacheHit: ({ cachePath, contentType, size }) => {
-    console.log(`cache hit path=${cachePath} type=${contentType} bytes=${size}`);
+  onRequest: ({ cache, durationMs, contentType, size }) => {
+    console.log(
+      `cache=${cache} duration_ms=${durationMs} type=${contentType} bytes=${size}`
+    );
   },
 });
 ```
