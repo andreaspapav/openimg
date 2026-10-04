@@ -74,7 +74,8 @@ test("bun FileCache: write uses temp+rename and get detects content types", asyn
 
     const res = await cache.get(cachePath, new Headers());
     expect(res).not.toBeNull();
-    expect(res!.headers.get("Content-Type")).toBe(c.type);
+    expect(res!.response.headers.get("Content-Type")).toBe(c.type);
+    expect(res!.size).toBe(c.bytes.length);
   }
 });
 

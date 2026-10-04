@@ -1,4 +1,5 @@
 export type {
+  CacheHitInfo,
   Config,
   Fit,
   Format,

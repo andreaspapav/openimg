@@ -251,7 +251,18 @@ export async function getImgResponse(request: Request, config: Config = {}) {
 
         const cached = await cache.get(cachePath, headers);
         if (cached) {
-          return cached;
+          if (config.onCacheHit) {
+            try {
+              config.onCacheHit({
+                cachePath,
+                contentType: cached.response.headers.get("Content-Type"),
+                size: cached.size,
+              });
+            } catch {
+              // Logging must not break serving
+            }
+          }
+          return cached.response;
         }
 
         // Another request may have taken the lock while we read the cache
@@ -426,7 +437,7 @@ export async function getImgResponse(request: Request, config: Config = {}) {
       await cache.write(cachePath, outputStream);
       const cached = await cache.get(cachePath, headers);
       invariant(cached, "Cache write succeeded but read returned null");
-      return cached;
+      return cached.response;
     }
 
     // no_cache: response streams lazily — release the semaphore when the

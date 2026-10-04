@@ -403,3 +403,27 @@ test("bun cache: disconnected request still transforms when a connected request 
   expect(res.headers.get("Content-Type")).toBe("image/webp");
   expect(transformed).toEqual(["busy", "shared"]);
 });
+
+test("bun cache: onCacheHit fires only on disk cache hits, not on miss/write", async () => {
+  const cacheFolder = freshDir("on-cache-hit");
+  const hits: Array<{ cachePath: string; contentType: string | null; size: number }> =
+    [];
+  const cfg = {
+    cacheFolder,
+    onCacheHit: (info: (typeof hits)[number]) => {
+      hits.push(info);
+    },
+  };
+  const qs = "?src=/cat.png&w=55&h=55&format=webp";
+
+  const miss = await getImgResponse(req(qs), cfg);
+  expect(miss.status).toBe(200);
+  expect(hits).toEqual([]);
+
+  const hit = await getImgResponse(req(qs), cfg);
+  expect(hit.status).toBe(200);
+  expect(hits).toHaveLength(1);
+  expect(hits[0]!.contentType).toBe("image/webp");
+  expect(hits[0]!.size).toBeGreaterThan(0);
+  expect(hits[0]!.cachePath).toContain("w-55");
+});

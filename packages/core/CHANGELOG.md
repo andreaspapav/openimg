@@ -9,6 +9,7 @@
 - Write via a unique `*.tmp` file then rename, so readers never see a partial file.
 - Fix `PipelineLock` so a timed-out request cannot release a newer lock (token-based resolve).
 - New opt-in `touchCacheOnHit`: update mtime on hit (throttled) so external cleanup can treat mtime as "last used".
+- New opt-in `onCacheHit`: callback when a response is served from disk cache (for logging without re-checking the filesystem).
 - New opt-in `maxConcurrentTransforms`: cap concurrent fetch+sharp work; cache hits never queue. Queued requests whose client disconnected are skipped (`499`) unless a connected request waits for the same image.
 - New opt-in `fetchTimeoutMs`, `maxSourceBytes` and `limitInputPixels` to bound how long and how much memory a single source image can take.
 - New opt-in `failedImageTtlMs`: return `422`/`404`/`502`/`504` responses instead of throwing for broken, too large, missing or unreachable source images, and remember broken and missing ones so repeat requests skip the work.

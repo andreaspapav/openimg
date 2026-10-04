@@ -100,7 +100,10 @@ export class FileCache {
     fs.mkdirSync(cacheFolder, { recursive: true });
   }
 
-  async get(cachePath: string, headers: Headers): Promise<Response | null> {
+  async get(
+    cachePath: string,
+    headers: Headers
+  ): Promise<{ response: Response; size: number } | null> {
     const file = Bun.file(cachePath);
     let header: Uint8Array;
     try {
@@ -115,7 +118,7 @@ export class FileCache {
     }
     headers.set("Content-Type", detectContentType(header));
     this.#maybeTouch(cachePath, file);
-    return new Response(file, { headers });
+    return { response: new Response(file, { headers }), size: file.size };
   }
 
   async write(cachePath: string, readable: Readable): Promise<void> {

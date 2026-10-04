@@ -107,6 +107,18 @@ getImgResponse(request, { touchCacheOnHit: true });
 getImgResponse(request, { touchCacheOnHit: { intervalMs: 60 * 60 * 1000 } });
 ```
 
+#### onCacheHit: (info: CacheHitInfo) => void (Bun only)
+
+Defaults to unset. Called when a response is served from the disk cache (not on a miss that writes a new file). Use this for logging instead of re-checking the filesystem in your server. Errors thrown from the callback are ignored so logging cannot break the response.
+
+```typescript
+getImgResponse(request, {
+  onCacheHit: ({ cachePath, contentType, size }) => {
+    console.log(`cache hit path=${cachePath} type=${contentType} bytes=${size}`);
+  },
+});
+```
+
 #### maxConcurrentTransforms: number (Bun only)
 
 Defaults to unlimited. Caps how many fetch+sharp transforms run at once. Cache hits never take a slot. Must be an integer ≥ 1.
