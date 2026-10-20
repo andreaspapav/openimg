@@ -1,3 +1,5 @@
+import { defaultLoader, type ImageLoader } from "./loader";
+
 export type ImageFormat = "avif" | "webp";
 export type ImageFit = "cover" | "contain";
 
@@ -25,6 +27,11 @@ export type ImageConfig = {
   formats: ImageFormat[];
   /** Skip the processor for every image, e.g. in development. */
   unoptimized: boolean;
+  /**
+   * Builds every processor URL: the app-wide equivalent of
+   * OpenImgContextProvider's `getSrc`. An Image's own `loader` prop wins.
+   */
+  loader: ImageLoader;
 };
 
 /**
@@ -39,4 +46,5 @@ export const imageConfig: ImageConfig = {
   // processor can afford it.
   formats: ["webp"],
   unoptimized: false,
+  loader: defaultLoader,
 };

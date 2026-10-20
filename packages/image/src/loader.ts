@@ -8,6 +8,11 @@ export type ImageLoaderArgs = {
   fit?: ImageFit;
   /** Unset for the <img> fallback, which keeps the original format. */
   format?: ImageFormat;
+  /**
+   * The Image's `params` prop, unchanged: extra query parameters such as
+   * `quality`, `position`, `objectKey` or a signature.
+   */
+  params?: Record<string, string>;
 };
 
 export type ImageLoader = (args: ImageLoaderArgs, config: ImageConfig) => string;
@@ -26,11 +31,12 @@ function resolveSrc(src: string, assetOrigin: string | undefined) {
 }
 
 /**
- * Builds `{endpoint}?src=…&w=…&h=…&fit=…&format=…`, the query format the
- * image processor parses.
+ * Builds `{endpoint}?src=…&w=…&h=…&fit=…&format=…` plus any `params`, the
+ * query format the image processor parses. Same output as openimg's
+ * defaultGetSrc.
  */
 export const defaultLoader: ImageLoader = (
-  { src, width, height, fit, format },
+  { src, width, height, fit, format, params: extra },
   config
 ) => {
   const params = new URLSearchParams({
@@ -40,5 +46,8 @@ export const defaultLoader: ImageLoader = (
   if (height !== undefined) params.set("h", String(height));
   if (fit) params.set("fit", fit);
   if (format) params.set("format", format);
+  for (const [key, value] of Object.entries(extra ?? {})) {
+    params.set(key, value);
+  }
   return `${config.endpoint}?${params}`;
 };

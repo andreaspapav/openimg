@@ -53,12 +53,39 @@ import hero from "~/assets/hero.jpg";
 | `priority` | LCP image: preload, eager loading, `fetchpriority="high"` |
 | `placeholder` | `"empty"`, `"blur"` (`blurDataURL` smoothed by an SVG blur filter), or a data URL shown as-is |
 | `unoptimized` | Use the original `src`. SVG, GIF, `data:` and `blob:` are never optimized |
-| `loader` | Custom URL builder for this image |
+| `params` | Extra query parameters for every URL of this image, passed to the loader (e.g. `{ quality: "70", position: "top" }`) |
+| `loader` | Custom URL builder for this image. Default: `config.loader` |
 | `formats` | Override `config.formats` for this image |
 
 Every other `<img>` attribute, `ref`, `onLoad` and `onError` go to the `<img>`.
 `getImageProps(props)` returns the computed `sources`, `img` attributes and
 preload arguments without rendering, for art direction or CSS backgrounds.
+
+## Coming from OpenImgContextProvider
+
+The provider's `getSrc` becomes `loader` in `config.ts`, and the Image's
+`params` prop works as before. The loader gets the same values, with the
+endpoint in `config.endpoint`:
+
+| openimg `GetSrcArgs` | `ImageLoaderArgs` + config |
+| --- | --- |
+| `src`, `width`, `height`, `fit`, `format`, `params` | same names (`height` is unset when the aspect ratio is unknown) |
+| `optimizerEndpoint` | `config.endpoint` |
+
+```ts
+// config.ts
+loader: ({ src, width, height, fit, format, params }, config) => {
+  // your existing getSrc body, e.g. objectKey vs src and passport signatures
+},
+```
+
+```tsx
+<Image src={url} alt="" width={800} height={600} params={{ quality: "70" }} />
+<Image src={url} alt="" width={800} height={600} params={{ objectKey, exp, sig }} />
+```
+
+`defaultLoader` builds the same URLs as openimg's `defaultGetSrc`, so a
+loader that only adds params needs no changes beyond the move.
 
 ## Blur placeholders
 

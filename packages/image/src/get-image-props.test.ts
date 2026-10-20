@@ -87,6 +87,23 @@ describe("defaultLoader", () => {
       "https://img.example.com/img?src=%2Fa.jpg&w=64"
     );
   });
+
+  test("appends params, like openimg's defaultGetSrc", () => {
+    expect(
+      defaultLoader(
+        {
+          src: "/a.jpg",
+          width: 64,
+          height: 32,
+          format: "webp",
+          params: { quality: "70", position: "left top" },
+        },
+        imageConfig
+      )
+    ).toBe(
+      "/img?src=%2Fa.jpg&w=64&h=32&format=webp&quality=70&position=left+top"
+    );
+  });
 });
 
 describe("getWidths", () => {
@@ -322,6 +339,92 @@ describe("getImageProps", () => {
     expect(sources[0]!.srcSet).toBe(
       "https://cdn.example.com/cat.jpg?width=128&fm=avif 1x, https://cdn.example.com/cat.jpg?width=256&fm=avif 2x"
     );
+  });
+
+  test("params reach every URL: each source, the srcset and the fallback", () => {
+    const { sources, img, preload } = getImageProps(
+      {
+        src: "/cat.jpg",
+        alt: "",
+        width: 300,
+        height: 150,
+        priority: true,
+        params: { quality: "70", position: "top" },
+      },
+      config
+    );
+    const urls = [
+      ...sources.flatMap((s) => parseSrcSet(s.srcSet)),
+      ...parseSrcSet(img.srcSet),
+      { params: params(img.src) },
+      { params: params(preload!.href) },
+    ];
+    expect(urls).toHaveLength(8);
+    for (const { params: query } of urls) {
+      expect(query).toMatchObject({ quality: "70", position: "top" });
+    }
+  });
+
+  test("config.loader builds URLs app-wide, like OpenImgContextProvider's getSrc", () => {
+    // An app getSrc: uploads by objectKey, everything else by src
+    const appLoader: ImageLoader = ({ src, width, height, format, params: extra }, cfg) => {
+      const { objectKey, ...rest } = extra ?? {};
+      const query = new URLSearchParams(objectKey ? { objectKey } : { src });
+      query.set("w", String(width));
+      if (height !== undefined) query.set("h", String(height));
+      if (format) query.set("format", format);
+      for (const [key, value] of Object.entries(rest)) query.set(key, value);
+      return `${cfg.endpoint}?${query}`;
+    };
+    const appConfig: ImageConfig = { ...config, loader: appLoader };
+
+    const upload = getImageProps(
+      {
+        src: "/placeholder.jpg",
+        alt: "",
+        width: 100,
+        height: 100,
+        params: { objectKey: "passports/u1/1.jpg", exp: "1792500000", sig: "abc" },
+      },
+      appConfig
+    );
+    expect(params(upload.img.src)).toEqual({
+      objectKey: "passports/u1/1.jpg",
+      w: "256",
+      h: "256",
+      exp: "1792500000",
+      sig: "abc",
+    });
+
+    const remote = getImageProps(
+      { src: "https://cdn.example.com/a.jpg", alt: "", width: 100, height: 100 },
+      appConfig
+    );
+    expect(params(remote.img.src)).toEqual({
+      src: "https://cdn.example.com/a.jpg",
+      w: "256",
+      h: "256",
+    });
+  });
+
+  test("a loader prop overrides config.loader", () => {
+    const appConfig: ImageConfig = { ...config, loader: () => "/from-config" };
+    const { img } = getImageProps(
+      { src: "/a.jpg", alt: "", width: 100, height: 100, loader: () => "/from-prop" },
+      appConfig
+    );
+    expect(img.src).toBe("/from-prop");
+    expect(
+      getImageProps({ src: "/a.jpg", alt: "", width: 100, height: 100 }, appConfig).img.src
+    ).toBe("/from-config");
+  });
+
+  test("params is not passed to the <img> element", () => {
+    const { img } = getImageProps(
+      { src: "/a.jpg", alt: "", width: 100, height: 100, params: { quality: "70" } },
+      config
+    );
+    expect(img).not.toHaveProperty("params");
   });
 
   test("defaults: lazy, async decoding, no fetch priority, no preload", () => {

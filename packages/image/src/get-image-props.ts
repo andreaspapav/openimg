@@ -6,7 +6,7 @@ import {
   type ImageFit,
   type ImageFormat,
 } from "./config";
-import { defaultLoader, type ImageLoader } from "./loader";
+import type { ImageLoader } from "./loader";
 
 /**
  * An image with known dimensions, e.g. a stored upload or a Vite plugin
@@ -60,8 +60,13 @@ export type ImageProps = Omit<
   blurDataURL?: string;
   /** Render the original `src` without the processor. */
   unoptimized?: boolean;
-  /** Build processor URLs differently for this image. */
+  /** Build processor URLs differently for this image. Default: `config.loader`. */
   loader?: ImageLoader;
+  /**
+   * Extra query parameters for every URL of this image, passed to the loader
+   * (like openimg's `params`), e.g. `{ quality: "70", position: "top" }`.
+   */
+  params?: Record<string, string>;
   /** Overrides `imageConfig.formats` for this image. */
   formats?: ImageFormat[];
   ref?: Ref<HTMLImageElement>;
@@ -232,7 +237,8 @@ export function buildImageProps(
     placeholder = "empty",
     blurDataURL,
     unoptimized = false,
-    loader = defaultLoader,
+    loader: loaderProp,
+    params,
     formats: formatsProp,
     loading,
     decoding,
@@ -245,6 +251,7 @@ export function buildImageProps(
   state: ImageState
 ): ImagePropsResult {
   const formats = formatsProp ?? config.formats;
+  const loader = loaderProp ?? config.loader;
   const staticData = typeof srcProp === "object" ? srcProp : undefined;
   const src = typeof srcProp === "object" ? srcProp.src : srcProp;
 
@@ -302,6 +309,7 @@ export function buildImageProps(
           height: ratio ? Math.round(w / ratio) : undefined,
           fit,
           format,
+          params,
         },
         config
       );
