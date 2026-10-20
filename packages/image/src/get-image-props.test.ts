@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { imageConfig, type ImageConfig } from "./config";
 import { getBlurSvg, getImageProps, getWidths } from "./get-image-props";
 import { defaultLoader, type ImageLoader } from "./loader";
@@ -37,7 +37,7 @@ function params(url: string) {
   return Object.fromEntries(new URL(url, "http://x").searchParams);
 }
 
-let consoleError = spyOn(console, "error").mockImplementation(() => {});
+let consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
 afterEach(() => {
   consoleError.mockClear();
 });
@@ -523,10 +523,10 @@ describe("getImageProps", () => {
 
   test("blur SVG escapes only what a data URL needs", () => {
     const url = getBlurSvg(WEBP_16, 1, false);
-    expect(url).toStartWith("data:image/svg+xml;charset=utf-8,%3Csvg ");
+    expect(url.startsWith("data:image/svg+xml;charset=utf-8,%3Csvg ")).toBe(true);
     expect(url).not.toMatch(/[<>#]/);
     // base64 is left as-is, so the placeholder stays small
-    expect(url).toInclude(WEBP_16);
+    expect(url).toContain(WEBP_16);
     expect(url.length).toBeLessThan(WEBP_16.length + 700);
   });
 

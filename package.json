@@ -7,7 +7,7 @@
     "test:bun": "cd tests/bun && bun test",
     "test:node": "cd tests/node && bun test",
     "test:react": "cd tests/react && bun test",
-    "test:image": "cd packages/image && bun test",
+    "test:image": "cd packages/image && bun run test",
     "test": "bun run test:bun && bun run test:node && bun run test:react && bun run test:image",
     "typecheck": "bun run typecheck:packages && bun run typecheck:tests",
     "typecheck:packages": "cd packages/core && bun run typecheck",

@@ -19,8 +19,12 @@ No context provider: settings live in `src/config.ts`.
    // Optional: skip the processor while developing
    unoptimized: import.meta.env.DEV,
    ```
-3. Move the tests next to the component and use the app's test runner
-   (they use `bun:test`, Testing Library and happy-dom).
+3. The tests (`*.test.ts(x)`) are Vitest tests and run as they are. Add
+   `vitest.setup.ts` to the app's Vitest `setupFiles` (or merge its lines into
+   the existing setup), and run them in a DOM environment: `happy-dom` or
+   `jsdom`, either in the config or with `// @vitest-environment happy-dom`
+   at the top of each file. They need `@testing-library/react`,
+   `@testing-library/dom` and `@testing-library/jest-dom`.
 
 ## Usage
 

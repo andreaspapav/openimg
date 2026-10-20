@@ -4,19 +4,19 @@
   "type": "module",
   "sideEffects": false,
   "scripts": {
-    "test": "bun test",
+    "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "@happy-dom/global-registrator": "^16.7.3",
     "@testing-library/dom": "^10.4.0",
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.2.0",
-    "@types/bun": "latest",
     "@types/react": "^19.0.8",
     "@types/react-dom": "^19.0.3",
+    "happy-dom": "^16.8.1",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "vitest": "^3.2.0"
   }
 }

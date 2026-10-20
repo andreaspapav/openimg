@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { act, createRef, useState } from "react";
 import { hydrateRoot } from "react-dom/client";
 import { renderToString } from "react-dom/server";
@@ -7,7 +7,7 @@ import { Image } from "./image";
 
 const BLUR = "data:image/png;base64,BLUR";
 
-let consoleError = spyOn(console, "error");
+let consoleError = vi.spyOn(console, "error");
 afterEach(() => {
   consoleError.mockClear();
 });
@@ -141,7 +141,7 @@ describe("Image", () => {
         />
       );
       const img = screen.getByAltText("Cat");
-      expect(img.style.backgroundImage).toInclude("BLUR");
+      expect(img.style.backgroundImage).toContain("BLUR");
 
       fireEvent.load(img);
       expect(img.style.backgroundImage).toBe("");
@@ -184,7 +184,7 @@ describe("Image", () => {
       expect(img.style.backgroundImage).toBe("");
 
       fireEvent.click(screen.getByText("next"));
-      expect(img.style.backgroundImage).toInclude("BLUR");
+      expect(img.style.backgroundImage).toContain("BLUR");
     });
 
     test("is cleared on mount if the image already loaded", () => {
@@ -226,7 +226,7 @@ describe("Image", () => {
       expect(link).not.toBeNull();
       expect(link).toHaveAttribute("type", "image/webp");
       expect(link).toHaveAttribute("imagesizes", "100vw");
-      expect(link.getAttribute("imagesrcset")).toInclude("format=webp");
+      expect(link.getAttribute("imagesrcset")).toContain("format=webp");
       expect(link).toHaveAttribute("fetchpriority", "high");
     });
 
@@ -241,10 +241,10 @@ describe("Image", () => {
       const html = renderToString(
         <Image src="/cat.jpg" alt="Cat" width={100} height={100} priority placeholder={BLUR} />
       );
-      expect(html).toInclude('<link rel="preload" as="image"');
-      expect(html).toInclude("<picture>");
-      expect(html).toInclude('type="image/webp"');
-      expect(html).toInclude("background-image");
+      expect(html).toContain('<link rel="preload" as="image"');
+      expect(html).toContain("<picture>");
+      expect(html).toContain('type="image/webp"');
+      expect(html).toContain("background-image");
     });
 
     test("renders the blur SVG into the HTML", () => {
@@ -253,8 +253,8 @@ describe("Image", () => {
       const html = renderToString(
         <Image src="/cat.jpg" alt="Cat" width={100} height={100} placeholder="blur" blurDataURL={BLUR} />
       );
-      expect(html).toInclude("background-image:url(&quot;data:image/svg+xml;charset=utf-8,%3Csvg");
-      expect(html).toInclude(`href=&#x27;${BLUR}&#x27;`);
+      expect(html).toContain("background-image:url(&quot;data:image/svg+xml;charset=utf-8,%3Csvg");
+      expect(html).toContain(`href=&#x27;${BLUR}&#x27;`);
     });
 
     test("hydrates without mismatches", async () => {
