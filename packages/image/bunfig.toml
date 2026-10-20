@@ -1,0 +1,3 @@
+[test]
+# happy-dom must register the DOM globals before testing-library loads
+preload = ["./test/happydom.ts", "./test/setup.ts"]
