@@ -21,6 +21,21 @@ export type StaticImageData = {
 
 export type PlaceholderValue = "empty" | "blur" | `data:image/${string}`;
 
+/** One pre-made file of an image: its width in pixels and its URL. */
+export type ImageVariant = { width: number; src: string };
+
+/**
+ * Pre-made files per format, e.g. Vite assets converted ahead of time. AVIF
+ * and WebP become <source>s (AVIF first); JPEG or PNG become the <img>'s
+ * srcset.
+ */
+export type ImageVariants = Partial<
+  Record<"avif" | "webp" | "jpeg" | "png", ImageVariant[]>
+>;
+
+// Order matters: the browser takes the first <source> it can decode
+const VARIANT_SOURCE_FORMATS = ["avif", "webp"] as const;
+
 type Dimension = number | `${number}`;
 
 export type ImageProps = Omit<
@@ -69,6 +84,12 @@ export type ImageProps = Omit<
   params?: Record<string, string>;
   /** Overrides `imageConfig.formats` for this image. */
   formats?: ImageFormat[];
+  /**
+   * Files you made yourself, used instead of the processor. `src` stays the
+   * <img> fallback. Without `sizes`, the image is assumed to fill the screen
+   * up to `width`: `(max-width: {width}px) 100vw, {width}px`.
+   */
+  variants?: ImageVariants;
   ref?: Ref<HTMLImageElement>;
 };
 
@@ -240,6 +261,7 @@ export function buildImageProps(
     loader: loaderProp,
     params,
     formats: formatsProp,
+    variants,
     loading,
     decoding,
     fetchPriority,
@@ -293,7 +315,32 @@ export function buildImageProps(
   let imgSizes: string | undefined;
   let preloadHref = src;
 
-  if (optimize) {
+  if (variants) {
+    const sorted = (list: ImageVariant[] | undefined) =>
+      list && list.length > 0 ? [...list].sort((a, b) => a.width - b.width) : undefined;
+    const srcSetOf = (list: ImageVariant[]) =>
+      list.map((v) => `${v.src} ${v.width}w`).join(", ");
+
+    const sourceLists = VARIANT_SOURCE_FORMATS.flatMap((format) => {
+      const list = sorted(variants[format]);
+      return list ? [{ format, list }] : [];
+    });
+    const fallback = sorted(variants.jpeg ?? variants.png);
+    if (sourceLists.length > 0 || fallback) {
+      imgSizes =
+        sizes ?? (width ? `(max-width: ${width}px) 100vw, ${width}px` : "100vw");
+    }
+    sources = sourceLists.map(({ format, list }) => ({
+      type: `image/${format}`,
+      srcSet: srcSetOf(list),
+      sizes: imgSizes,
+    }));
+    imgSrcSet = fallback ? srcSetOf(fallback) : undefined;
+    const preloadList = sourceLists[0]?.list ?? fallback;
+    if (preloadList) {
+      preloadHref = preloadList[preloadList.length - 1]!.src;
+    }
+  } else if (optimize) {
     const { widths, kind } = getWidths(
       config,
       width,

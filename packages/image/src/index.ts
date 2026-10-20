@@ -6,10 +6,13 @@ export {
   type ImageProps,
   type ImagePropsResult,
   type ImageSource,
+  type ImageVariant,
+  type ImageVariants,
   type ImgAttributes,
   type PlaceholderValue,
   type StaticImageData,
 } from "./get-image-props";
+export { variantsFromGlob } from "./variants";
 export {
   defaultLoader,
   type ImageLoader,

@@ -60,10 +60,53 @@ import hero from "~/assets/hero.jpg";
 | `params` | Extra query parameters for every URL of this image, passed to the loader (e.g. `{ quality: "70", position: "top" }`) |
 | `loader` | Custom URL builder for this image. Default: `config.loader` |
 | `formats` | Override `config.formats` for this image |
+| `variants` | Files you made yourself, `{ avif?, webp?, jpeg?, png?: { width, src }[] }`, used instead of the processor |
 
 Every other `<img>` attribute, `ref`, `onLoad` and `onError` go to the `<img>`.
 `getImageProps(props)` returns the computed `sources`, `img` attributes and
 preload arguments without rendering, for art direction or CSS backgrounds.
+
+## Pre-made files (variants)
+
+For images you converted ahead of time (e.g. Vite assets in several widths),
+pass the files instead of going through the processor:
+
+```tsx
+<Image
+  src={heroJpg} // the <img> fallback
+  alt=""
+  width={1280}
+  height={720}
+  variants={{
+    avif: [{ width: 640, src: hero640Avif }, { width: 1280, src: hero1280Avif }],
+    webp: [{ width: 640, src: hero640Webp }, { width: 1280, src: hero1280Webp }],
+  }}
+/>
+```
+
+- AVIF and WebP become `<source>`s, AVIF first; a `jpeg` or `png` list
+  becomes the `<img>` srcset. Files are sorted by width.
+- Without `sizes`, the image is assumed to fill the screen up to `width`:
+  `(max-width: 1280px) 100vw, 1280px`. Pass `sizes` when it's narrower (e.g.
+  in a grid).
+- `fill`, `priority` (preloads your files), placeholders and lazy loading
+  work as for other images.
+
+Files named `<name>-<width>.<format>` can be collected with Vite's
+`import.meta.glob` instead of one import per file. The pattern must be written
+out in the app, because Vite resolves it at build time:
+
+```ts
+import { variantsFromGlob } from "~/components/image";
+
+const heroVariants = variantsFromGlob(
+  import.meta.glob("~/assets/hero-*.{avif,webp,jpg}", {
+    eager: true,
+    import: "default",
+    query: "?url",
+  })
+);
+```
 
 ## Coming from OpenImgContextProvider
 
