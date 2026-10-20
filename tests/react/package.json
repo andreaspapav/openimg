@@ -19,7 +19,7 @@
     "typescript": "^5.0.0"
   },
   "dependencies": {
-    "openimg": "workspace:*",
+    "openimg": "workspace:@andreaspapav/openimg@*",
     "react": ">=18.0.0",
     "react-dom": ">=18.0.0"
   }

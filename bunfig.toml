@@ -1,0 +1,4 @@
+[install]
+# Peer dependencies (react, sharp) come from the root node_modules; a
+# second copy inside packages/core breaks React hooks in the tests
+peer = false

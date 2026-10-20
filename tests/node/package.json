@@ -2,7 +2,7 @@
   "name": "openimg-node-tests",
   "type": "module",
   "dependencies": {
-    "openimg": "workspace:*"
+    "openimg": "workspace:@andreaspapav/openimg@*"
   },
   "scripts": {
     "test": "bun test",
